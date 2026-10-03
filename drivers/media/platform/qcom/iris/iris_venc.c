@@ -178,6 +178,7 @@ int iris_venc_enum_fmt(struct iris_inst *inst, struct v4l2_fmtdesc *f)
 
 int iris_venc_try_fmt(struct iris_inst *inst, struct v4l2_format *f)
 {
+	struct platform_inst_caps *caps = inst->core->iris_platform_data->inst_caps;
 	struct v4l2_pix_format_mplane *pixmp = &f->fmt.pix_mp;
 	struct v4l2_format *f_inst;
 	bool supported;
@@ -209,6 +210,22 @@ int iris_venc_try_fmt(struct iris_inst *inst, struct v4l2_format *f)
 		pixmp->field = V4L2_FIELD_NONE;
 
 	pixmp->num_planes = 1;
+
+	/* Stay inside what the hardware can encode instead of accepting any size */
+	pixmp->width = clamp(pixmp->width, caps->min_frame_width, caps->max_frame_width);
+	pixmp->height = clamp(pixmp->height, caps->min_frame_height, caps->max_frame_height);
+
+	/*
+	 * The VPU scaler can only scale down: the firmware rejects an upscale
+	 * (HFI_ERR_SESSION_UPSCALE_NOT_SUPPORTED), so never let the encoded size
+	 * grow beyond the raw frame.
+	 */
+	if (f->type == V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE) {
+		pixmp->width = min(pixmp->width,
+				   max(inst->enc_raw_width, caps->min_frame_width));
+		pixmp->height = min(pixmp->height,
+				    max(inst->enc_raw_height, caps->min_frame_height));
+	}
 
 	return 0;
 }
