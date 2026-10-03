@@ -21,7 +21,14 @@ static int iris_hfi_queue_write(struct iris_iface_q_info *qinfo, void *packet, u
 		empty_space = read_idx - write_idx;
 	else
 		empty_space = IFACEQ_QUEUE_SIZE - (write_idx -  read_idx);
-	if (empty_space < packet_size)
+
+	/*
+	 * read_idx == write_idx means "empty". A packet that fills the queue
+	 * completely would make the write index catch up with the read index
+	 * and the firmware would see an empty queue, so one slot is always
+	 * kept free.
+	 */
+	if (empty_space <= packet_size)
 		return -ENOSPC;
 
 	queue->tx_req =  0;
