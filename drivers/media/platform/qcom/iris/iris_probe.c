@@ -6,6 +6,8 @@
 #include <linux/clk.h>
 #include <linux/interconnect.h>
 #include <linux/module.h>
+#include <linux/of_address.h>
+#include <linux/of_device.h>
 #include <linux/pm_domain.h>
 #include <linux/pm_opp.h>
 #include <linux/pm_runtime.h>
@@ -293,6 +295,16 @@ static int iris_probe(struct platform_device *pdev)
 
 	dma_set_max_seg_size(&pdev->dev, DMA_BIT_MASK(32));
 	dma_set_seg_boundary(&pdev->dev, DMA_BIT_MASK(32));
+
+	/*
+	 * The SC7280 VPU is I/O coherent. If the node lacks "dma-coherent" the
+	 * kernel maps the shared buffers with attributes that do not match what
+	 * the hardware uses and the encoder reads, or the decoder writes,
+	 * stale or corrupted frames.
+	 */
+	if (of_device_is_compatible(dev->of_node, "qcom,sc7280-venus") &&
+	    !of_dma_is_coherent(dev->of_node))
+		dev_warn(dev, "DT node has no \"dma-coherent\": video data may be corrupted\n");
 
 	pm_runtime_set_autosuspend_delay(core->dev, AUTOSUSPEND_DELAY_VALUE);
 	pm_runtime_use_autosuspend(core->dev);
