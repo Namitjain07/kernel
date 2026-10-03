@@ -232,8 +232,17 @@ void iris_vb2_stop_streaming(struct vb2_queue *q)
 	inst = vb2_get_drv_priv(q);
 	iris_wait_for_sys_error(inst->core);
 
-	if (V4L2_TYPE_IS_CAPTURE(q->type) && inst->state == IRIS_INST_INIT)
+	if (V4L2_TYPE_IS_CAPTURE(q->type) && inst->state == IRIS_INST_INIT) {
+		/*
+		 * The firmware session has not started streaming, so there is
+		 * nothing to stop, but vb2 still requires every queued buffer
+		 * to be handed back from stop_streaming().
+		 */
+		mutex_lock(&inst->lock);
+		iris_helper_buffers_done(inst, q->type, VB2_BUF_STATE_ERROR);
+		mutex_unlock(&inst->lock);
 		return;
+	}
 
 	mutex_lock(&inst->lock);
 
