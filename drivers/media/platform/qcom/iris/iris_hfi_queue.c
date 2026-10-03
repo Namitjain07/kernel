@@ -21,7 +21,14 @@ static int iris_hfi_queue_write(struct iris_iface_q_info *qinfo, void *packet, u
 		empty_space = read_idx - write_idx;
 	else
 		empty_space = IFACEQ_QUEUE_SIZE - (write_idx -  read_idx);
-	if (empty_space < packet_size)
+
+	/*
+	 * read_idx == write_idx means "empty". A packet that fills the queue
+	 * completely would make the write index catch up with the read index
+	 * and the firmware would see an empty queue, so one slot is always
+	 * kept free.
+	 */
+	if (empty_space <= packet_size)
 		return -ENOSPC;
 
 	queue->tx_req =  0;
@@ -132,24 +139,20 @@ int iris_hfi_queue_cmd_write(struct iris_core *core, void *pkt, u32 pkt_size)
 
 	ret = pm_runtime_resume_and_get(core->dev);
 	if (ret < 0)
-		goto exit;
+		return ret;
 
 	mutex_lock(&core->lock);
 	ret = iris_hfi_queue_cmd_write_locked(core, pkt, pkt_size);
-	if (ret) {
-		mutex_unlock(&core->lock);
-		goto exit;
-	}
 	mutex_unlock(&core->lock);
+
+	if (ret) {
+		pm_runtime_put_sync(core->dev);
+		return ret;
+	}
 
 	pm_runtime_put_autosuspend(core->dev);
 
 	return 0;
-
-exit:
-	pm_runtime_put_sync(core->dev);
-
-	return ret;
 }
 
 int iris_hfi_queue_msg_read(struct iris_core *core, void *pkt)

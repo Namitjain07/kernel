@@ -231,6 +231,16 @@ void iris_vpu_power_off_hw(struct iris_core *core)
 
 void iris_vpu_power_off(struct iris_core *core)
 {
+	/*
+	 * Tell the IRQ thread that the registers are about to go away. Taking
+	 * the lock also waits for a register access that is already running.
+	 * Unlike disable_irq() this never waits for the thread itself, so it
+	 * is safe with core->lock held, which the IRQ thread also needs.
+	 */
+	spin_lock(&core->hw_lock);
+	core->hw_powered = false;
+	spin_unlock(&core->hw_lock);
+
 	iris_opp_set_rate(core->dev, 0);
 	core->iris_platform_data->vpu_ops->power_off_hw(core);
 	core->iris_platform_data->vpu_ops->power_off_controller(core);
@@ -295,12 +305,12 @@ int iris_vpu_power_on_hw(struct iris_core *core)
 
 	ret = iris_prepare_enable_clock(core, IRIS_BSE_HW_CLK);
 	if (ret && ret != -ENOENT)
-		goto err_disable_bse_hw_clock;
+		goto err_disable_hw_ahb_clock;
 
 	return 0;
 
-err_disable_bse_hw_clock:
-	iris_disable_unprepare_clock(core, IRIS_BSE_HW_CLK);
+err_disable_hw_ahb_clock:
+	iris_disable_unprepare_clock(core, IRIS_HW_AHB_CLK);
 err_disable_hw_clock:
 	iris_disable_unprepare_clock(core, IRIS_HW_CLK);
 err_disable_power:
@@ -486,7 +496,12 @@ int iris_vpu_power_on(struct iris_core *core)
 	iris_vpu_set_preset_registers(core);
 
 	iris_vpu_interrupt_init(core);
+
+	spin_lock(&core->hw_lock);
 	core->intr_status = 0;
+	core->hw_powered = true;
+	spin_unlock(&core->hw_lock);
+
 	enable_irq(core->irq);
 
 	return 0;

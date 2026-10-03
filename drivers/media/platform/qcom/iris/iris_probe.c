@@ -6,6 +6,8 @@
 #include <linux/clk.h>
 #include <linux/interconnect.h>
 #include <linux/module.h>
+#include <linux/of_address.h>
+#include <linux/of_device.h>
 #include <linux/pm_domain.h>
 #include <linux/pm_opp.h>
 #include <linux/pm_runtime.h>
@@ -201,10 +203,14 @@ static void iris_remove(struct platform_device *pdev)
 	if (!core)
 		return;
 
-	iris_core_deinit(core);
-
+	/* No new users first: an open() after the teardown would bring the core back up */
 	video_unregister_device(core->vdev_dec);
 	video_unregister_device(core->vdev_enc);
+
+	/* The recovery work uses the core and may be pending after a firmware error */
+	cancel_delayed_work_sync(&core->sys_error_handler);
+
+	iris_core_deinit(core);
 
 	v4l2_device_unregister(&core->v4l2_dev);
 
@@ -236,6 +242,7 @@ static int iris_probe(struct platform_device *pdev)
 
 	core->state = IRIS_CORE_DEINIT;
 	mutex_init(&core->lock);
+	spin_lock_init(&core->hw_lock);
 	init_completion(&core->core_init_done);
 	init_completion(&core->sys_error_done);
 	complete_all(&core->sys_error_done);
@@ -278,9 +285,40 @@ static int iris_probe(struct platform_device *pdev)
 	if (ret)
 		return ret;
 
+	platform_set_drvdata(pdev, core);
+
+	dma_mask = core->iris_platform_data->dma_mask;
+
+	ret = dma_set_mask_and_coherent(dev, dma_mask);
+	if (ret)
+		goto err_fw_deinit;
+
+	dma_set_max_seg_size(&pdev->dev, DMA_BIT_MASK(32));
+	dma_set_seg_boundary(&pdev->dev, DMA_BIT_MASK(32));
+
+	/*
+	 * The SC7280 VPU is I/O coherent. If the node lacks "dma-coherent" the
+	 * kernel maps the shared buffers with attributes that do not match what
+	 * the hardware uses and the encoder reads, or the decoder writes,
+	 * stale or corrupted frames.
+	 */
+	if (of_device_is_compatible(dev->of_node, "qcom,sc7280-venus") &&
+	    !of_dma_is_coherent(dev->of_node))
+		dev_warn(dev, "DT node has no \"dma-coherent\": video data may be corrupted\n");
+
+	pm_runtime_set_autosuspend_delay(core->dev, AUTOSUSPEND_DELAY_VALUE);
+	pm_runtime_use_autosuspend(core->dev);
+	ret = devm_pm_runtime_enable(core->dev);
+	if (ret)
+		goto err_fw_deinit;
+
+	/*
+	 * Everything open() relies on (runtime PM, DMA mask, drvdata) is in
+	 * place now; only publish the device nodes after this point.
+	 */
 	ret = v4l2_device_register(dev, &core->v4l2_dev);
 	if (ret)
-		return ret;
+		goto err_fw_deinit;
 
 	ret = iris_register_video_device(core, DECODER);
 	if (ret)
@@ -290,31 +328,14 @@ static int iris_probe(struct platform_device *pdev)
 	if (ret)
 		goto err_vdev_unreg_dec;
 
-	platform_set_drvdata(pdev, core);
-
-	dma_mask = core->iris_platform_data->dma_mask;
-
-	ret = dma_set_mask_and_coherent(dev, dma_mask);
-	if (ret)
-		goto err_vdev_unreg_enc;
-
-	dma_set_max_seg_size(&pdev->dev, DMA_BIT_MASK(32));
-	dma_set_seg_boundary(&pdev->dev, DMA_BIT_MASK(32));
-
-	pm_runtime_set_autosuspend_delay(core->dev, AUTOSUSPEND_DELAY_VALUE);
-	pm_runtime_use_autosuspend(core->dev);
-	ret = devm_pm_runtime_enable(core->dev);
-	if (ret)
-		goto err_vdev_unreg_enc;
-
 	return 0;
 
-err_vdev_unreg_enc:
-	video_unregister_device(core->vdev_enc);
 err_vdev_unreg_dec:
 	video_unregister_device(core->vdev_dec);
 err_v4l2_unreg:
 	v4l2_device_unregister(&core->v4l2_dev);
+err_fw_deinit:
+	iris_fw_deinit(core);
 
 	return ret;
 }

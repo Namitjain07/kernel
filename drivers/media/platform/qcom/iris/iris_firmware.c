@@ -36,9 +36,11 @@ static bool iris_detect_gen2_from_fwdata(const u8 *data, size_t size)
 	max = (size > mlen) ? size - mlen : 0;
 	for (size_t i = 0; i < max; i++) {
 		if (!memcmp(data + i, marker, mlen)) {
-			const char *found = (const char *)(data + i + mlen);
+			size_t avail = min(sizeof(version_buf) - 1, size - (i + mlen));
 
-			strscpy(version_buf, found, sizeof(version_buf));
+			/* The string may sit at the very end of the blob: never read past it */
+			memcpy(version_buf, data + i + mlen, avail);
+			version_buf[avail] = '\0';
 			if (!strncmp(version_buf, "vfw", 3))
 				return true;
 			if (sscanf(version_buf, "video-firmware.%d.%d", &major, &minor) == 2 &&
@@ -161,9 +163,15 @@ static int iris_load_fw_to_memory(struct iris_core *core)
 
 	fw_size = qcom_mdt_get_size(firmware);
 	if (fw_size < 0 || res_size < (size_t)fw_size) {
+		dev_err(dev, "firmware %s needs %zd bytes but the reserved memory region has %zu\n",
+			fw_name, fw_size, res_size);
 		ret = -EINVAL;
 		goto err_release_fw;
 	}
+
+	dev_info(dev, "firmware %s: %s HFI, %zd of %zu bytes of reserved memory\n", fw_name,
+		 core->iris_firmware_data == &iris_hfi_gen2_data ? "Gen2" : "Gen1",
+		 fw_size, res_size);
 
 	mem_virt = memremap(mem_phys, res_size, MEMREMAP_WC);
 	if (!mem_virt) {
@@ -244,8 +252,10 @@ int iris_fw_unload(struct iris_core *core)
 
 	if (core->use_tz)
 		ret = qcom_scm_pas_shutdown(IRIS_PAS_ID);
-	else
+	else if (core->hw_powered)
 		ret = iris_set_hw_state_no_tz(core, false);
+	else
+		ret = 0; /* unclocked: the CPU is already held in reset */
 
 	if (core->fw.mapped_mem_size) {
 		size_t unmapped = iommu_unmap(core->fw.iommu_domain, IRIS_FW_START_ADDR,

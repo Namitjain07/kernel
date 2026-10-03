@@ -18,14 +18,12 @@ int iris_venc_inst_init(struct iris_inst *inst)
 {
 	struct iris_core *core = inst->core;
 	struct v4l2_format *f;
+	int ret = 0;
 
 	inst->fmt_src = kzalloc_obj(*inst->fmt_src);
 	inst->fmt_dst = kzalloc_obj(*inst->fmt_dst);
-	if (!inst->fmt_src || !inst->fmt_dst) {
-		kfree(inst->fmt_src);
-		kfree(inst->fmt_dst);
-		return -ENOMEM;
-	}
+	if (!inst->fmt_src || !inst->fmt_dst)
+		goto err_free_fmt;
 
 	f = inst->fmt_dst;
 	f->type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
@@ -76,7 +74,19 @@ int iris_venc_inst_init(struct iris_inst *inst)
 	memcpy(&inst->fw_caps[0], &core->inst_fw_caps_enc[0],
 	       INST_FW_CAP_MAX * sizeof(struct platform_inst_fw_cap));
 
-	return iris_ctrls_init(inst);
+	ret = iris_ctrls_init(inst);
+	if (ret)
+		goto err_free_fmt;
+
+	return 0;
+
+err_free_fmt:
+	kfree(inst->fmt_src);
+	kfree(inst->fmt_dst);
+	inst->fmt_src = NULL;
+	inst->fmt_dst = NULL;
+
+	return ret ? ret : -ENOMEM;
 }
 
 static const u32 iris_venc_formats_cap[] = {
@@ -168,6 +178,7 @@ int iris_venc_enum_fmt(struct iris_inst *inst, struct v4l2_fmtdesc *f)
 
 int iris_venc_try_fmt(struct iris_inst *inst, struct v4l2_format *f)
 {
+	struct platform_inst_caps *caps = inst->core->iris_platform_data->inst_caps;
 	struct v4l2_pix_format_mplane *pixmp = &f->fmt.pix_mp;
 	struct v4l2_format *f_inst;
 	bool supported;
@@ -199,6 +210,22 @@ int iris_venc_try_fmt(struct iris_inst *inst, struct v4l2_format *f)
 		pixmp->field = V4L2_FIELD_NONE;
 
 	pixmp->num_planes = 1;
+
+	/* Stay inside what the hardware can encode instead of accepting any size */
+	pixmp->width = clamp(pixmp->width, caps->min_frame_width, caps->max_frame_width);
+	pixmp->height = clamp(pixmp->height, caps->min_frame_height, caps->max_frame_height);
+
+	/*
+	 * The VPU scaler can only scale down: the firmware rejects an upscale
+	 * (HFI_ERR_SESSION_UPSCALE_NOT_SUPPORTED), so never let the encoded size
+	 * grow beyond the raw frame.
+	 */
+	if (f->type == V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE) {
+		pixmp->width = min(pixmp->width,
+				   max(inst->enc_raw_width, caps->min_frame_width));
+		pixmp->height = min(pixmp->height,
+				    max(inst->enc_raw_height, caps->min_frame_height));
+	}
 
 	return 0;
 }
@@ -240,7 +267,10 @@ static int iris_venc_s_fmt_output(struct iris_inst *inst, struct v4l2_format *f)
 	inst->buffers[BUF_OUTPUT].size = fmt->fmt.pix_mp.plane_fmt[0].sizeimage;
 	fmt->fmt.pix_mp.pixelformat = f->fmt.pix_mp.pixelformat;
 	inst->codec = f->fmt.pix_mp.pixelformat;
-	memcpy(f, fmt, sizeof(struct v4l2_format));
+
+	/* S_SELECTION and the raw side of S_FMT pass the instance format itself */
+	if (f != fmt)
+		memcpy(f, fmt, sizeof(struct v4l2_format));
 
 	return 0;
 }
@@ -289,11 +319,11 @@ static int iris_venc_s_fmt_input(struct iris_inst *inst, struct v4l2_format *f)
 	inst->enc_scale_width = raw_width;
 	inst->enc_scale_height = raw_height;
 
-	/* S_FMT resets the crop rectangle to the full negotiated buffer. */
+	/* S_FMT resets the crop rectangle to the full visible frame. */
 	inst->crop.top = 0;
 	inst->crop.left = 0;
-	inst->crop.width = fmt->fmt.pix_mp.width;
-	inst->crop.height = fmt->fmt.pix_mp.height;
+	inst->crop.width = raw_width;
+	inst->crop.height = raw_height;
 
 	ret = iris_venc_s_fmt_output(inst, output_fmt);
 	if (ret)
@@ -350,17 +380,28 @@ int iris_venc_subscribe_event(struct iris_inst *inst,
 
 int iris_venc_s_selection(struct iris_inst *inst, struct v4l2_selection *s)
 {
+	struct platform_inst_caps *caps = inst->core->iris_platform_data->inst_caps;
+
 	if (s->type != V4L2_BUF_TYPE_VIDEO_OUTPUT)
 		return -EINVAL;
 
 	switch (s->target) {
 	case V4L2_SEL_TGT_CROP:
+		/*
+		 * The crop and the encoded size are programmed into the firmware
+		 * when streaming starts, so they cannot change afterwards.
+		 */
+		if (vb2_is_streaming(v4l2_m2m_get_src_vq(inst->m2m_ctx)) ||
+		    vb2_is_streaming(v4l2_m2m_get_dst_vq(inst->m2m_ctx)))
+			return -EBUSY;
+
+		/* Only a crop anchored at the origin is supported. Adjust rather than fail. */
 		s->r.left = 0;
 		s->r.top = 0;
-
-		if (s->r.width > inst->enc_raw_width ||
-		    s->r.height > inst->enc_raw_height)
-			return -EINVAL;
+		s->r.width = clamp(s->r.width, min(caps->min_frame_width, inst->enc_raw_width),
+				   inst->enc_raw_width);
+		s->r.height = clamp(s->r.height, min(caps->min_frame_height, inst->enc_raw_height),
+				    inst->enc_raw_height);
 
 		inst->crop.left = s->r.left;
 		inst->crop.top = s->r.top;
@@ -404,7 +445,8 @@ int iris_venc_s_param(struct iris_inst *inst, struct v4l2_streamparm *s_parm)
 			timeperframe->denominator = default_rate;
 	}
 
-	fps = timeperframe->denominator / timeperframe->numerator;
+	/* Round to nearest: 30000/1001 is 30 fps, not the 29 that truncation gives */
+	fps = DIV_ROUND_CLOSEST(timeperframe->denominator, timeperframe->numerator);
 	if (!fps)
 		return -EINVAL;
 
