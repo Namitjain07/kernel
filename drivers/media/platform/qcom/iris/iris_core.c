@@ -12,6 +12,8 @@
 #include "iris_state.h"
 #include "iris_vpu_common.h"
 
+#define IRIS_SYS_ERROR_TIMEOUT_MS	(5 * HW_RESPONSE_TIMEOUT_VALUE)
+
 void iris_core_deinit(struct iris_core *core)
 {
 	int ret;
@@ -77,7 +79,14 @@ void iris_core_deinit_on_error(struct iris_core *core)
 
 void iris_wait_for_sys_error(struct iris_core *core)
 {
-	wait_for_completion(&core->sys_error_done);
+	/*
+	 * Recovery runs from a work item that has to talk to the secure world
+	 * and the firmware. Do not let a recovery that never completes turn
+	 * close() or STREAMOFF into a task that can neither finish nor be killed.
+	 */
+	if (!wait_for_completion_timeout(&core->sys_error_done,
+					 msecs_to_jiffies(IRIS_SYS_ERROR_TIMEOUT_MS)))
+		dev_err(core->dev, "timed out waiting for system error recovery\n");
 }
 
 static int iris_wait_for_system_response(struct iris_core *core)
