@@ -163,9 +163,15 @@ static int iris_load_fw_to_memory(struct iris_core *core)
 
 	fw_size = qcom_mdt_get_size(firmware);
 	if (fw_size < 0 || res_size < (size_t)fw_size) {
+		dev_err(dev, "firmware %s needs %zd bytes but the reserved memory region has %zu\n",
+			fw_name, fw_size, res_size);
 		ret = -EINVAL;
 		goto err_release_fw;
 	}
+
+	dev_info(dev, "firmware %s: %s HFI, %zd of %zu bytes of reserved memory\n", fw_name,
+		 core->iris_firmware_data == &iris_hfi_gen2_data ? "Gen2" : "Gen1",
+		 fw_size, res_size);
 
 	mem_virt = memremap(mem_phys, res_size, MEMREMAP_WC);
 	if (!mem_virt) {
