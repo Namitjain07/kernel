@@ -316,11 +316,11 @@ static int iris_venc_s_fmt_input(struct iris_inst *inst, struct v4l2_format *f)
 	inst->enc_scale_width = raw_width;
 	inst->enc_scale_height = raw_height;
 
-	/* S_FMT resets the crop rectangle to the full negotiated buffer. */
+	/* S_FMT resets the crop rectangle to the full visible frame. */
 	inst->crop.top = 0;
 	inst->crop.left = 0;
-	inst->crop.width = fmt->fmt.pix_mp.width;
-	inst->crop.height = fmt->fmt.pix_mp.height;
+	inst->crop.width = raw_width;
+	inst->crop.height = raw_height;
 
 	ret = iris_venc_s_fmt_output(inst, output_fmt);
 	if (ret)
@@ -377,17 +377,28 @@ int iris_venc_subscribe_event(struct iris_inst *inst,
 
 int iris_venc_s_selection(struct iris_inst *inst, struct v4l2_selection *s)
 {
+	struct platform_inst_caps *caps = inst->core->iris_platform_data->inst_caps;
+
 	if (s->type != V4L2_BUF_TYPE_VIDEO_OUTPUT)
 		return -EINVAL;
 
 	switch (s->target) {
 	case V4L2_SEL_TGT_CROP:
+		/*
+		 * The crop and the encoded size are programmed into the firmware
+		 * when streaming starts, so they cannot change afterwards.
+		 */
+		if (vb2_is_streaming(v4l2_m2m_get_src_vq(inst->m2m_ctx)) ||
+		    vb2_is_streaming(v4l2_m2m_get_dst_vq(inst->m2m_ctx)))
+			return -EBUSY;
+
+		/* Only a crop anchored at the origin is supported. Adjust rather than fail. */
 		s->r.left = 0;
 		s->r.top = 0;
-
-		if (s->r.width > inst->enc_raw_width ||
-		    s->r.height > inst->enc_raw_height)
-			return -EINVAL;
+		s->r.width = clamp(s->r.width, min(caps->min_frame_width, inst->enc_raw_width),
+				   inst->enc_raw_width);
+		s->r.height = clamp(s->r.height, min(caps->min_frame_height, inst->enc_raw_height),
+				    inst->enc_raw_height);
 
 		inst->crop.left = s->r.left;
 		inst->crop.top = s->r.top;
