@@ -20,9 +20,12 @@ int iris_vdec_inst_init(struct iris_inst *inst)
 {
 	struct iris_core *core = inst->core;
 	struct v4l2_format *f;
+	int ret = 0;
 
 	inst->fmt_src = kzalloc_obj(*inst->fmt_src);
 	inst->fmt_dst = kzalloc_obj(*inst->fmt_dst);
+	if (!inst->fmt_src || !inst->fmt_dst)
+		goto err_free_fmt;
 
 	inst->fw_min_count = 0;
 
@@ -59,7 +62,19 @@ int iris_vdec_inst_init(struct iris_inst *inst)
 	memcpy(&inst->fw_caps[0], &core->inst_fw_caps_dec[0],
 	       INST_FW_CAP_MAX * sizeof(struct platform_inst_fw_cap));
 
-	return iris_ctrls_init(inst);
+	ret = iris_ctrls_init(inst);
+	if (ret)
+		goto err_free_fmt;
+
+	return 0;
+
+err_free_fmt:
+	kfree(inst->fmt_src);
+	kfree(inst->fmt_dst);
+	inst->fmt_src = NULL;
+	inst->fmt_dst = NULL;
+
+	return ret ? ret : -ENOMEM;
 }
 
 static const u32 iris_vdec_formats_cap[] = {
