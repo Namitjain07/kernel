@@ -244,8 +244,10 @@ int iris_fw_unload(struct iris_core *core)
 
 	if (core->use_tz)
 		ret = qcom_scm_pas_shutdown(IRIS_PAS_ID);
-	else
+	else if (core->hw_powered)
 		ret = iris_set_hw_state_no_tz(core, false);
+	else
+		ret = 0; /* unclocked: the CPU is already held in reset */
 
 	if (core->fw.mapped_mem_size) {
 		size_t unmapped = iommu_unmap(core->fw.iommu_domain, IRIS_FW_START_ADDR,
