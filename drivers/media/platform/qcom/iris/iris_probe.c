@@ -236,6 +236,7 @@ static int iris_probe(struct platform_device *pdev)
 
 	core->state = IRIS_CORE_DEINIT;
 	mutex_init(&core->lock);
+	spin_lock_init(&core->hw_lock);
 	init_completion(&core->core_init_done);
 	init_completion(&core->sys_error_done);
 	complete_all(&core->sys_error_done);

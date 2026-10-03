@@ -126,17 +126,28 @@ irqreturn_t iris_hfi_isr(int irq, void *data)
 irqreturn_t iris_hfi_isr_handler(int irq, void *data)
 {
 	struct iris_core *core = data;
+	bool powered;
 
 	if (!core)
 		return IRQ_NONE;
 
-	mutex_lock(&core->lock);
-	pm_runtime_mark_last_busy(core->dev);
-	iris_vpu_clear_interrupt(core);
-	mutex_unlock(&core->lock);
+	/*
+	 * The clocks may be switched off while this thread is waiting to run.
+	 * Touching the interrupt registers then is a bus error, so only do it
+	 * while iris_vpu_power_off() has not yet marked the hardware as off.
+	 */
+	spin_lock(&core->hw_lock);
+	powered = core->hw_powered;
+	if (powered) {
+		pm_runtime_mark_last_busy(core->dev);
+		iris_vpu_clear_interrupt(core);
+	}
+	spin_unlock(&core->hw_lock);
 
-	core->hfi_sys_ops->sys_hfi_response_handler(core);
+	if (powered)
+		core->hfi_sys_ops->sys_hfi_response_handler(core);
 
+	/* Pairs with the disable_irq_nosync() in iris_hfi_isr() */
 	if (!iris_vpu_watchdog(core, core->intr_status))
 		enable_irq(irq);
 
