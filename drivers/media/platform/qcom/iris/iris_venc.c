@@ -442,7 +442,8 @@ int iris_venc_s_param(struct iris_inst *inst, struct v4l2_streamparm *s_parm)
 			timeperframe->denominator = default_rate;
 	}
 
-	fps = timeperframe->denominator / timeperframe->numerator;
+	/* Round to nearest: 30000/1001 is 30 fps, not the 29 that truncation gives */
+	fps = DIV_ROUND_CLOSEST(timeperframe->denominator, timeperframe->numerator);
 	if (!fps)
 		return -EINVAL;
 
